@@ -1,101 +1,122 @@
 import os
+import pandas as pd
 import rasterio
 import numpy as np
 import torch
 from datetime import datetime, timedelta
+from lib.lstm_definition import LSTM
+from lib.data_scaler import DataScaler
 
 # ---------------------------
 # Settings
 # ---------------------------
 data_folder = "data"  # folder containing subfolders for each variable
-input_vars = ["hurs", "pr", "rsds", "sfcWind", "tas", "tasmax", "tasmin"]
-target_var = "SWE"
+model_folder = "models" # folder containing the trained LSTM model and scalers
+dynamic_vars = ["pr", "rsds", "tas"]
+static_vars = ["elevation_mn", "slope_mn", "eastness_mn", "northness_mn", "tpi_mn"]
+target_var = "swe"
 partition_size = 64      # partition size
-seq_len = 1              # sequence length
-device = "cuda" if torch.cuda.is_available() else "cpu"
+H, W = 10080, 43200      # dimensions of the input maps
 
 # Date range
-start_date = datetime(1981, 4, 19)
-end_date   = datetime(2020, 4, 21)  # example 3 days
+warmup_date = datetime(1979, 10, 1)
+start_date = datetime(1980, 10, 1)
+end_date   = datetime(2020, 9, 30)
 
-# Initial SWE map for the first day
-swe_start_file = os.path.join(data_folder, target_var, "SWE_start.tif")
-with rasterio.open(swe_start_file) as src:
-    swe_prev = src.read(1)  # initial SWE
-
-# Dummy LSTM model (replace with trained model)
-num_features = len(input_vars) + 1  # input vars + previous SWE
+# Load the LSTM model
+num_features = len(dynamic_vars) + len(static_vars) + 1  # dynamic vars + static vars + previous SWE
 hidden_size = 5  # example
-lstm = torch.nn.LSTM(input_size=num_features, hidden_size=hidden_size, batch_first=True).to(device)
-linear = torch.nn.Linear(hidden_size, 1).to(device)  # map hidden to SWE
+lstm_model = LSTM(input_size=num_features, hidden_size=hidden_size)
+lstm_model.load_state_dict(
+    torch.load(os.path.join(model_folder, "lstm_model.pt"), weights_only=True)
+    )
+lstm_model.eval()
+
+# Load data scalers
+scalers = DataScaler()
+scalers.load_transformers(model_folder)
+trans_zero_swe = scalers.get_transformed_zero()
+target_transformer = scalers.get_transformers().get('target')
 
 # ---------------------------
 # Loop over dates
 # ---------------------------
-current_date = start_date
+current_date = warmup_date
+hidden_states = [None] * (H//partition_size * W//partition_size)  # one hidden state per partition
+swe_prev = np.zeros((H, W), dtype=np.float32) # initialize SWE at 0 for warmup
+
 while current_date <= end_date:
     day_str = current_date.strftime("%d_%m_%Y")
 
     # Read input variables for this day
-    partitions = []
-    for var in input_vars:
+    variable_maps = []
+    for var in dynamic_vars:
         var_file = os.path.join(data_folder, var, f"CHELSA_{var}_{day_str}_V.2.1.tif")
         with rasterio.open(var_file) as src:
-            partitions.append(src.read(1))  # shape H x W
+            var_map = src.read(1)  # shape H x W
+            if var_map.shape != (H, W):
+                raise ValueError(f"Variable {var} on {day_str} has shape {var_map.shape}, expected {(H, W)}")
+            variable_maps.append(var_map)
 
     # Stack variables: shape [num_vars, H, W]
-    stacked = np.stack(partitions, axis=0)
-    H, W = stacked.shape[1], stacked.shape[2]
+    dynamic_stacked = np.stack(variable_maps, axis=0)
 
     # Add previous SWE to input stack: shape [num_vars+1, H, W]
-    stacked = np.concatenate([stacked, swe_prev[np.newaxis, :, :]], axis=0)
-
-    # Prepare output SWE map
-    swe_pred_full = np.zeros((H, W), dtype=np.float32)
+    dynamic_stacked = np.concatenate([swe_prev[np.newaxis, :, :], dynamic_stacked], axis=0)
 
     # ---------------------------
     # Loop over partitions
     # ---------------------------
     for i in range(0, H, partition_size):
         for j in range(0, W, partition_size):
-            block = stacked[:, i:i+partition_size, j:j+partition_size]
-            ph, pw = block.shape[1], block.shape[2]
+            dynamic_partition = dynamic_stacked[:, i:i+partition_size, j:j+partition_size]
+            ph, pw = dynamic_partition.shape[1], dynamic_partition.shape[2]
 
             # Flatten pixels: [num_pixels, num_features]
-            block_flat = block.reshape(num_features, -1).T  # [num_pixels, num_features]
+            dynamic_partition_flat = dynamic_partition.reshape(len(dynamic_vars) + 1, -1).T
+
+            # Transform the dynamic variables using the scalers
+            dynamic_partition_df = pd.DataFrame(dynamic_partition_flat, columns=['prev_swe'] + dynamic_vars)
+            dynamic_partition_tensor = scalers.transform_dataframe(dynamic_partition_df, var_group='dynamic')
 
             # LSTM input: [batch_size=num_pixels, seq_len=1, num_features]
-            batch_size = block_flat.shape[0]
-            block_tensor = torch.tensor(block_flat, dtype=torch.float32).reshape(batch_size, seq_len, num_features).to(device)
+            batch_size = dynamic_partition_tensor.shape[0]
+            lstm_inputs = dynamic_partition_tensor.reshape(batch_size, 1, len(dynamic_vars) + 1)
 
-            # Run LSTM
+            # Gather previous hidden state, run the LSTM model, and update hidden state
             with torch.no_grad():
-                output, _ = lstm(block_tensor)  # [batch_size, seq_len, hidden_size]
-                pred = linear(output[:, 0, :])  # [batch_size, 1]
+                prev_hidden = hidden_states[(i//partition_size) * (W//partition_size) + (j//partition_size)]
+                pred, hidden_state = lstm_model(lstm_inputs, min_val=trans_zero_swe, hidden_state=prev_hidden)
+                hidden_states[(i//partition_size) * (W//partition_size) + (j//partition_size)] = hidden_state
 
             # Reshape back to partition map
             pred_map = pred.cpu().numpy().reshape(ph, pw)
-            swe_pred_full[i:i+ph, j:j+pw] = pred_map
+            swe_prev[i:i+ph, j:j+pw] = pred_map
 
     # ---------------------------
     # Save predicted SWE for current day
     # ---------------------------
-    out_file = os.path.join(data_folder, target_var, f"SWE_pred_{day_str}.tif")
-    with rasterio.open(
-        out_file,
-        'w',
-        driver='GTiff',
-        height=H,
-        width=W,
-        count=1,
-        dtype=np.float32,
-        crs=src.crs,
-        transform=src.transform
-    ) as dst:
-        dst.write(swe_pred_full, 1)
+    if current_date >= start_date:
+        
+        # Inverse transform the predictions and snap small values to zero
+        inv_trans_preds = target_transformer.inverse_transform(pd.DataFrame(swe_prev.flatten(), columns=['swe']))
+        inv_trans_preds = np.where(inv_trans_preds < 0.1, 0, inv_trans_preds).reshape(H, W).astype(np.float32)
 
-    # Update SWE for next day
-    swe_prev = swe_pred_full.copy()
+        # Save as GeoTIFF
+        out_file = os.path.join(data_folder, target_var, f"SWE_pred_{day_str}.tif")
+        with rasterio.open(
+            out_file,
+            'w',
+            driver='GTiff',
+            height=H,
+            width=W,
+            count=1,
+            dtype=np.float32,
+            crs=src.crs,
+            transform=src.transform
+        ) as dst:
+            dst.write(inv_trans_preds, 1)
+
     print(f"Day {day_str} predicted and saved.")
 
     # Next day
