@@ -14,7 +14,6 @@ input_vars = ["hurs", "pr", "rsds", "sfcWind", "tas", "tasmax", "tasmin"]
 target_var = "SWE"
 partition_size = 64      # partition size
 seq_len = 1              # sequence length
-device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Date range
 warmup_date = datetime(1979, 10, 1)
@@ -67,7 +66,7 @@ while current_date <= end_date:
 
             # LSTM input: [batch_size=num_pixels, seq_len=1, num_features]
             batch_size = block_flat.shape[0]
-            block_tensor = torch.tensor(block_flat, dtype=torch.float32).reshape(batch_size, seq_len, num_features).to(device)
+            block_tensor = torch.tensor(block_flat, dtype=torch.float32).reshape(batch_size, seq_len, num_features)
 
             # Gather previous hidden state, run the LSTM model, and update hidden state
             with torch.no_grad():
