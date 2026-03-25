@@ -3,11 +3,13 @@ import rasterio
 import numpy as np
 import torch
 from datetime import datetime, timedelta
+from lib.lstm_definition import LSTM
 
 # ---------------------------
 # Settings
 # ---------------------------
 data_folder = "data"  # folder containing subfolders for each variable
+model_folder = "models"  # folder containing the saved LSTM model
 input_vars = ["hurs", "pr", "rsds", "sfcWind", "tas", "tasmax", "tasmin"]
 target_var = "SWE"
 partition_size = 64      # partition size
@@ -23,16 +25,20 @@ swe_start_file = os.path.join(data_folder, target_var, "SWE_start.tif")
 with rasterio.open(swe_start_file) as src:
     swe_prev = src.read(1)  # initial SWE
 
-# Dummy LSTM model (replace with trained model)
+# Load the LSTM model
 num_features = len(input_vars) + 1  # input vars + previous SWE
 hidden_size = 5  # example
-lstm = torch.nn.LSTM(input_size=num_features, hidden_size=hidden_size, batch_first=True).to(device)
-linear = torch.nn.Linear(hidden_size, 1).to(device)  # map hidden to SWE
+lstm_model = LSTM(input_size=num_features, hidden_size=hidden_size)
+lstm_model.load_state_dict(
+    torch.load(os.path.join(model_folder, "lstm_model.pt"), weights_only=True)
+    )
+lstm_model.eval()
 
 # ---------------------------
 # Loop over dates
 # ---------------------------
 current_date = start_date
+hidden_states = [None] * (H//partition_size * W//partition_size)  # one hidden state per partition
 while current_date <= end_date:
     day_str = current_date.strftime("%d_%m_%Y")
 
@@ -68,10 +74,11 @@ while current_date <= end_date:
             batch_size = block_flat.shape[0]
             block_tensor = torch.tensor(block_flat, dtype=torch.float32).reshape(batch_size, seq_len, num_features).to(device)
 
-            # Run LSTM
+            # Gather previous hidden state, run the LSTM model, and update hidden state
             with torch.no_grad():
-                output, _ = lstm(block_tensor)  # [batch_size, seq_len, hidden_size]
-                pred = linear(output[:, 0, :])  # [batch_size, 1]
+                prev_hidden = hidden_states[(i//partition_size) * (W//partition_size) + (j//partition_size)]
+                pred, hidden_state = lstm_model(block_tensor, min_val=0.0, hidden_state=prev_hidden)
+                hidden_states[(i//partition_size) * (W//partition_size) + (j//partition_size)] = hidden_state
 
             # Reshape back to partition map
             pred_map = pred.cpu().numpy().reshape(ph, pw)
