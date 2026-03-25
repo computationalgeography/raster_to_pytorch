@@ -17,8 +17,9 @@ seq_len = 1              # sequence length
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Date range
-start_date = datetime(1981, 4, 19)
-end_date   = datetime(2020, 4, 21)  # example 3 days
+warmup_date = datetime(1979, 10, 1)
+start_date = datetime(1980, 10, 1)
+end_date   = datetime(2020, 9, 30)
 
 # Initial SWE map for the first day
 swe_start_file = os.path.join(data_folder, target_var, "SWE_start.tif")
@@ -37,7 +38,7 @@ lstm_model.eval()
 # ---------------------------
 # Loop over dates
 # ---------------------------
-current_date = start_date
+current_date = warmup_date
 hidden_states = [None] * (H//partition_size * W//partition_size)  # one hidden state per partition
 while current_date <= end_date:
     day_str = current_date.strftime("%d_%m_%Y")
@@ -87,19 +88,20 @@ while current_date <= end_date:
     # ---------------------------
     # Save predicted SWE for current day
     # ---------------------------
-    out_file = os.path.join(data_folder, target_var, f"SWE_pred_{day_str}.tif")
-    with rasterio.open(
-        out_file,
-        'w',
-        driver='GTiff',
-        height=H,
-        width=W,
-        count=1,
-        dtype=np.float32,
-        crs=src.crs,
-        transform=src.transform
-    ) as dst:
-        dst.write(swe_pred_full, 1)
+    if current_date >= start_date:
+        out_file = os.path.join(data_folder, target_var, f"SWE_pred_{day_str}.tif")
+        with rasterio.open(
+            out_file,
+            'w',
+            driver='GTiff',
+            height=H,
+            width=W,
+            count=1,
+            dtype=np.float32,
+            crs=src.crs,
+            transform=src.transform
+        ) as dst:
+            dst.write(swe_pred_full, 1)
 
     # Update SWE for next day
     swe_prev = swe_pred_full.copy()
