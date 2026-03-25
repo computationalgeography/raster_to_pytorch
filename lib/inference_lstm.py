@@ -21,11 +21,6 @@ warmup_date = datetime(1979, 10, 1)
 start_date = datetime(1980, 10, 1)
 end_date   = datetime(2020, 9, 30)
 
-# Initial SWE map for the first day
-swe_start_file = os.path.join(data_folder, target_var, "SWE_start.tif")
-with rasterio.open(swe_start_file) as src:
-    swe_prev = src.read(1)  # initial SWE
-
 # Load the LSTM model
 num_features = len(input_vars) + 1  # input vars + previous SWE
 hidden_size = 5  # example
@@ -40,6 +35,8 @@ lstm_model.eval()
 # ---------------------------
 current_date = warmup_date
 hidden_states = [None] * (H//partition_size * W//partition_size)  # one hidden state per partition
+swe_prev = np.zeros((H, W), dtype=np.float32) # initialize SWE at 0 for warmup
+
 while current_date <= end_date:
     day_str = current_date.strftime("%d_%m_%Y")
 
@@ -55,10 +52,7 @@ while current_date <= end_date:
     H, W = stacked.shape[1], stacked.shape[2]
 
     # Add previous SWE to input stack: shape [num_vars+1, H, W]
-    stacked = np.concatenate([stacked, swe_prev[np.newaxis, :, :]], axis=0)
-
-    # Prepare output SWE map
-    swe_pred_full = np.zeros((H, W), dtype=np.float32)
+    stacked = np.concatenate([swe_prev[np.newaxis, :, :], stacked], axis=0)
 
     # ---------------------------
     # Loop over partitions
@@ -83,7 +77,7 @@ while current_date <= end_date:
 
             # Reshape back to partition map
             pred_map = pred.cpu().numpy().reshape(ph, pw)
-            swe_pred_full[i:i+ph, j:j+pw] = pred_map
+            swe_prev[i:i+ph, j:j+pw] = pred_map
 
     # ---------------------------
     # Save predicted SWE for current day
@@ -101,10 +95,8 @@ while current_date <= end_date:
             crs=src.crs,
             transform=src.transform
         ) as dst:
-            dst.write(swe_pred_full, 1)
+            dst.write(swe_prev, 1)
 
-    # Update SWE for next day
-    swe_prev = swe_pred_full.copy()
     print(f"Day {day_str} predicted and saved.")
 
     # Next day
