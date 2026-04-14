@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import sys
-from lib.interpolate import interpolate_missing_day  # import your function here
+from lib.interpolate import interpolate_missing_day
 
 
 def main():
