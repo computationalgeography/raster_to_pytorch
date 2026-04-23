@@ -7,11 +7,7 @@ import torch
 from datetime import datetime, timedelta
 from pathlib import Path
 from lib.lstm_definition import LSTM
-
-import lib.data_scaler as ds      # load real module
-sys.modules["data_scaler"] = ds   # alias old name ? new module
-from lib.data_scaler import DataScaler  # normal usage
-
+from lib.data_scaler import DataScaler
 
 def run_inference():
     # ---------------------------
