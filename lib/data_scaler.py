@@ -45,3 +45,6 @@ class DataScaler:
                 % (var_group, list(self.transformers.keys()))
             )
         return self.to_tensor(self.transformers[var_group].transform(df))
+        
+    def log1p_clip(self, x):
+        return np.log1p(np.clip(x, 0, None))
