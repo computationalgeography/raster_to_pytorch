@@ -65,7 +65,7 @@ def run_inference():
     # ---------------------------
     # Init state
     # ---------------------------
-    swe_prev = np.zeros((H, W), dtype=np.float32)
+    swe_prev = np.full((H, W), fill_value=trans_zero_swe, dtype=np.float32)
 
     num_blocks_y = (H + partition_size_y - 1) // partition_size_y
     num_blocks_x = (W + partition_size_x - 1) // partition_size_x
