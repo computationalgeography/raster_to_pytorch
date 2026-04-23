@@ -2,6 +2,18 @@ import numpy as np
 import pandas as pd
 import pickle
 import torch
+from pathlib import Path
+
+
+class CustomUnpickler(pickle.Unpickler):
+    def find_class(self, module, name):
+        # Redirect imports to the correct module
+        if module == "data_scaler":
+            module = "lib.data_scaler"
+        # Handle pathlib.PosixPath for cross-platform compatibility
+        if module == "pathlib" and name == "PosixPath":
+            return Path
+        return super().find_class(module, name)
 
 class DataScaler:
     def __init__(self):
@@ -15,7 +27,7 @@ class DataScaler:
         for var_group in self.var_groups:
             file_path = scalers_path / f'{var_group}_transformer.pkl'
             with open(file_path, 'rb') as f:
-                self.transformers[var_group] = pickle.load(f)
+                self.transformers[var_group] = CustomUnpickler(f).load()
 
     def get_transformers(self):
         return self.transformers
