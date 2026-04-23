@@ -25,6 +25,8 @@ class LSTM(nn.Module):
         # output += prev_swe
         
         # Ensure output is above the minimum value (SWE>=0)
-        output.clamp(min=min_val)
+        
+        #output.clamp(min=min_val)
+        output = output.clamp(min=min_val)
         
         return output, hidden
