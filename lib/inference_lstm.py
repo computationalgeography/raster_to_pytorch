@@ -7,11 +7,7 @@ import torch
 from datetime import datetime, timedelta
 from pathlib import Path
 from lib.lstm_definition import LSTM
-
-import lib.data_scaler as ds      # load real module
-sys.modules["data_scaler"] = ds   # alias old name ? new module
-from lib.data_scaler import DataScaler  # normal usage
-
+from lib.data_scaler import DataScaler
 
 def run_inference():
     # ---------------------------
@@ -60,14 +56,12 @@ def run_inference():
     # ---------------------------
     scalers = DataScaler()
     scalers.load_transformers(scalers_path_model_folder)
-
     trans_zero_swe = scalers.get_transformed_zero()
-    target_transformer = scalers.get_transformers().get('target')
 
     # ---------------------------
     # Init state
     # ---------------------------
-    swe_prev = np.zeros((H, W), dtype=np.float32)
+    swe_prev = np.full((H, W), fill_value=trans_zero_swe, dtype=np.float32)
 
     num_blocks_y = (H + partition_size_y - 1) // partition_size_y
     num_blocks_x = (W + partition_size_x - 1) // partition_size_x
@@ -209,19 +203,7 @@ def run_inference():
         # ---------------------------
         if current_date >= start_date:
 
-            print("type(target_transformer): ", type(target_transformer))
-            print("target_transformer: ", target_transformer)
-            hasattr(target_transformer, "inverse_transform")
-
-            # inv = target_transformer.inverse_transform(
-            #     pd.DataFrame(swe_prev.flatten(), columns=['swe'])
-            # )
-
-            # inv = target_transformer.inverse_transform(swe_prev.reshape(-1, 1))
-
-            std_scaler = target_transformer.named_transformers_['std_scaler']
-            swe_reshaped = swe_prev.reshape(-1, 1)
-            inv = std_scaler.inverse_transform(swe_reshaped)
+            inv = scalers.inverse_transform_target(swe_prev)
 
             inv = np.where(inv < 0.1, 0, inv)
             inv = inv.reshape(H, W).astype(np.float32)
