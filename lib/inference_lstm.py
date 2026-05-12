@@ -42,8 +42,9 @@ def run_inference():
     # num_features = len(dynamic_vars) + len(static_vars) + 1  # + previous SWE
     num_features = len(all_vars) + 1  # + previous SWE
 
-    hidden_size = 5
-    lstm_model = LSTM(input_size=num_features, hidden_size=hidden_size)
+    hidden_size = 128   # hybrid: 128, LSTM: 64
+    num_layers = 1      # hybrid: 1, LSTM: 2
+    lstm_model = LSTM(input_size=num_features, hidden_size=hidden_size, num_layers=num_layers)
 
     # lstm_model.load_state_dict(
     #     torch.load(os.path.join(model_folder, "lstm_model.pt"), weights_only=True)

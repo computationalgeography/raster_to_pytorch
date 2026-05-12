@@ -1,13 +1,14 @@
 import torch.nn as nn
 
 class LSTM(nn.Module):
-    def __init__(self, input_size, hidden_size=64):
+    def __init__(self, input_size, hidden_size, num_layers=1):
         super().__init__()
-        
+
         # LSTM layer
         self.predict_lstm = nn.LSTM(
             input_size=input_size,
             hidden_size=hidden_size,
+            num_layers=num_layers,
             batch_first=True
         )
         
