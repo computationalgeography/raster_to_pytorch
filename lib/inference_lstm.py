@@ -6,8 +6,12 @@ import numpy as np
 import torch
 from datetime import datetime, timedelta
 from pathlib import Path
-from lib.lstm_definition import LSTM
+#from lib.lstm_definition import LSTM
+from lib.lstm_definition import LSTM_MultiLayer
 from lib.data_scaler import DataScaler
+
+import time
+
 
 def run_inference():
     # ---------------------------
@@ -15,7 +19,7 @@ def run_inference():
     # ---------------------------
     dynamic_data_folder = "/projects/prjs1930/pilot_data"   # "data"
     static_data_folder = "/projects/prjs1930/pilot_data/DEM"   # "data"
-    model_folder = "models"
+    model_folder = "models_0"
 
     scalers_path_model_folder = Path(model_folder)
 
@@ -29,6 +33,9 @@ def run_inference():
     partition_size_x = 300
 
     H, W = 10080, 43200
+    
+#    partition_size_y = H
+#    partition_size_x = W
 
     # Date range
     warmup_date = datetime(1979, 10, 1)   # initital date 
@@ -42,8 +49,12 @@ def run_inference():
     # num_features = len(dynamic_vars) + len(static_vars) + 1  # + previous SWE
     num_features = len(all_vars) + 1  # + previous SWE
 
-    hidden_size = 5
-    lstm_model = LSTM(input_size=num_features, hidden_size=hidden_size)
+#    hidden_size = 5 #128
+#    lstm_model = LSTM(input_size=num_features, hidden_size=hidden_size)
+    
+    hidden_size = 128     #64  #32   #64 #128   # hybrid: 128, LSTM: 64
+    num_layers = 1      # hybrid: 1, LSTM: 2
+    lstm_model = LSTM_MultiLayer(input_size=num_features, hidden_size=hidden_size, num_layers=num_layers)
 
     # lstm_model.load_state_dict(
     #     torch.load(os.path.join(model_folder, "lstm_model.pt"), weights_only=True)
@@ -68,7 +79,8 @@ def run_inference():
 
     hidden_states = [None] * (num_blocks_y * num_blocks_x)   # one hidden state per partition
 
-
+    start_read_static_var = time.perf_counter()
+    
     # ---------------------------
     # read static vars
     # ---------------------------
@@ -80,6 +92,8 @@ def run_inference():
 
         with rasterio.open(var_file_static) as src:
             var_map_static = src.read(1)
+            
+            profile = src.profile.copy()
 
             print(f"reading {var} ...")
 
@@ -89,6 +103,10 @@ def run_inference():
             variable_maps_static.append(var_map_static)
 
     static_stacked = np.stack(variable_maps_static, axis=0)
+    
+    end_read_static_var = time.perf_counter()
+
+    print("Elapsed time:", end_read_static_var - start_read_static_var, "seconds")
 
 
     # ---------------------------
@@ -166,10 +184,10 @@ def run_inference():
                 scaled_all_vars = np.concatenate([target_flat, scaled_dynamic, scaled_static], axis=1)   #  ['swe', 'pr', 'rsds', 'tas', 'static_vars']
 
 
-                print("scaled_dynamic shape:", scaled_dynamic.shape)
-                print("scaled_static shape:", scaled_static.shape)
-                print("scaled_all_vars shape:", scaled_all_vars.shape)
-                print("num_features expected:", num_features)
+#                print("scaled_dynamic shape:", scaled_dynamic.shape)
+#                print("scaled_static shape:", scaled_static.shape)
+#                print("scaled_all_vars shape:", scaled_all_vars.shape)
+#                print("num_features expected:", num_features)
 
 
                 # LSTM input
@@ -213,16 +231,26 @@ def run_inference():
 
             out_file = os.path.join(out_dir, f"SWE_pred_{day_str}.tif")
 
-            with rasterio.open(
-                out_file,
-                'w',
-                driver='GTiff',
-                height=H,
-                width=W,
-                count=1,
-                dtype=np.float32
-            ) as dst:
-                dst.write(inv, 1)
+#            with rasterio.open(
+#                out_file,
+#                'w',
+#                driver='GTiff',
+#                height=H,
+#                width=W,
+#                count=1,
+#                dtype=np.float32
+#            ) as dst:
+#                dst.write(inv, 1)
+
+            profile.update(
+            dtype=rasterio.float32,
+            count=1,
+            compress="ZSTD"
+            )
+        
+            with rasterio.open(out_file, 'w', **profile) as dst:
+              dst.write(inv, 1)
+              
 
         print(f"{day_str} done")
 
