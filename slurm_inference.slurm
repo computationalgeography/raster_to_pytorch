@@ -11,7 +11,7 @@
 # #SBATCH --nodelist=fcn12     #fcn10
 
 #SBATCH --partition=fat_genoa
-#SBATCH --nodelist=fcn104 
+#SBATCH --nodelist=fcn108      #fcn104 
 
 
 # #SBATCH --gres=gpu
