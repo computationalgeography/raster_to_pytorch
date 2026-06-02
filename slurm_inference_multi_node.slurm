@@ -2,11 +2,11 @@
 #SBATCH --job-name=lstm_inference_multi_node
 #SBATCH --nodes=4
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=16     #32          #16
 #SBATCH --mail-user=s.farajigargari@uu.nl
 #SBATCH --mail-type=ALL
 #SBATCH --partition=fat_genoa
-#SBATCH --mem=800G #500G  #250G       # define allocated memory 
+#SBATCH --mem=250G     #800G #500G  #250G       # define allocated memory 
 #SBATCH --time=02:00:00
 #SBATCH -o job_%x_%j.out
 #SBATCH -e job_%x_%j.err
@@ -25,4 +25,5 @@ conda activate /home/sfaraji1/.conda/envs/pytorch_env
 
 export PYTHONPATH="/projects/prjs1930/saeb/20260218_Oriol_snow_model_LSTM:$PYTHONPATH"
 
-srun python script/inference_multi_node.py
+#srun python script/inference_multi_node.py
+srun python script/inference_multi_node_hybrid_model.py
