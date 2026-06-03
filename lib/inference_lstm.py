@@ -1,23 +1,31 @@
 import os
 
 
-#os.environ['OMP_NUM_THREADS'] = '1'
-#os.environ['MKL_NUM_THREADS'] = '1'
-#os.environ['OPENBLAS_NUM_THREADS'] = '1'
-#os.environ['NUMEXPR_NUM_THREADS'] = '1'
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['NUMEXPR_NUM_THREADS'] = '1'
 
+import torch
 
+num_threads = int(os.environ["SLURM_CPUS_PER_TASK"])
+
+torch.set_num_threads(num_threads)
+torch.set_num_interop_threads(1)
 
 import sys
 import pandas as pd
 import rasterio
 import numpy as np
-import torch
+
 from datetime import datetime, timedelta
 from pathlib import Path
 #from lib.lstm_definition import LSTM
 from lib.lstm_definition import LSTM_MultiLayer
 from lib.data_scaler import DataScaler
+
+from rasterio.windows import Window
+
 
 #from memory_profiler import profile
 
@@ -341,7 +349,7 @@ def run_inference_with_mask():
     dynamic_data_folder = "/projects/prjs1930/pilot_data"
     static_data_folder = "/projects/prjs1930/pilot_data/DEM"
 
-    model_folder = "models_0" # "models_20260510"
+    model_folder = "models_0" #"models_20260510" #"models_0"
 
     scalers_path_model_folder = Path(model_folder)
 
@@ -380,9 +388,9 @@ def run_inference_with_mask():
 
     warmup_date = datetime(1979, 10, 1)
 
-    start_date = datetime(1979, 10, 5)     #datetime(1979, 10, 5)
+    start_date = datetime(1979, 10, 3)     #datetime(1979, 10, 5)
 
-    end_date = datetime(1979, 10, 30)      #datetime(1979, 10, 10)
+    end_date = datetime(1979, 10, 5)      #datetime(1979, 10, 10)
 
     # =====================================================
     # MODEL
@@ -390,8 +398,8 @@ def run_inference_with_mask():
 
     num_features = len(all_vars) + 1
 
-    hidden_size = 128
-    num_layers = 1
+    hidden_size = 128 #64    
+    num_layers = 1    #2    
 
     lstm_model = LSTM_MultiLayer(
         input_size=num_features,
@@ -895,5 +903,573 @@ def run_inference_with_mask():
             f"\n{day_str} completed in "
             f"{total_day_end - total_day_start:.2f} seconds"
         )
+
+        current_date += timedelta(days=1)
+        
+
+
+def run_inference_multi_node():
+
+    # =====================================================
+    # DOMAIN SIZE
+    # =====================================================
+    H, W = 10080, 43200
+
+    partition_size_y = 2500   #1000   #200
+    partition_size_x = 2500   #1000   #300
+
+    # =====================================================
+    # SLURM SETUP
+    # =====================================================
+    n_tasks = int(os.environ["SLURM_NTASKS"])
+    rank = int(os.environ["SLURM_PROCID"])
+    
+#    n_cols = int(np.sqrt(n_tasks))
+#    n_rows = int(np.ceil(n_tasks / n_cols))
+
+    print("get_num_threads: ", torch.get_num_threads())
+    print("get_num_interop_threads: ", torch.get_num_interop_threads())
+
+    n_cols = n_tasks
+    n_rows = 1
+
+    row_id = rank // n_cols
+    col_id = rank % n_cols
+
+    row_blocks = np.array_split(np.arange(H), n_rows)
+    col_blocks = np.array_split(np.arange(W), n_cols)
+
+    H_start = row_blocks[row_id][0]
+    H_end   = row_blocks[row_id][-1] + 1
+
+    W_start = col_blocks[col_id][0]
+    W_end   = col_blocks[col_id][-1] + 1
+
+    H_task = H_end - H_start
+    W_task = W_end - W_start
+
+    # =====================================================
+    # PATHS
+    # =====================================================
+    dynamic_data_folder = "/projects/prjs1930/pilot_data"
+    static_data_folder = "/projects/prjs1930/pilot_data/DEM"
+    mask_file = "/projects/prjs1930/pilot_data/inference_mask.tif"
+    model_folder = "models_0" #"models_20260510" #"models_0"
+    
+    scalers_path_model_folder = Path(model_folder)
+
+    dynamic_vars = ["pr", "rsds", "tas"]
+    static_vars = ["elevation_mn", "slope_mn", "eastness_mn", "northness_mn", "tpi_mn"]
+
+    target_var = "swe"
+
+    all_vars = dynamic_vars + static_vars
+    num_features = len(all_vars) + 1
+
+    # =====================================================
+    # MODEL
+    # =====================================================
+    
+    hidden_size = 128 #64    
+    num_layers = 1    #2    
+
+    lstm_model = LSTM_MultiLayer(
+        input_size=num_features,
+        hidden_size=hidden_size,
+        num_layers=num_layers
+    )
+    
+    model_path = os.path.join(model_folder, "lstm_model.pt")
+
+    lstm_model.load_state_dict(
+        torch.load(model_path, map_location="cpu")
+    )
+    lstm_model.eval()
+
+    # =====================================================
+    # SCALERS
+    # =====================================================
+
+    scalers = DataScaler()
+
+    scalers.load_transformers(
+        scalers_path_model_folder
+    )
+
+    trans_zero_swe = scalers.get_transformed_zero()
+
+    # =====================================================
+    # WINDOW (CRITICAL)
+    # =====================================================
+    window = Window(
+        col_off=W_start,
+        row_off=H_start,
+        width=W_task,
+        height=H_task
+    )
+
+    # =====================================================
+    # MASK (LOCAL ONLY)
+    # =====================================================
+    with rasterio.open(mask_file) as src:
+        local_mask = src.read(1, window=window).astype(bool)
+
+    # =====================================================
+    # STATIC DATA (READ ONLY ONCE PER NODE)
+    # =====================================================
+    static_maps = []
+
+    NODATA_VALUE = -9999.0
+    profile = None
+
+    for var in static_vars:
+
+        path = os.path.join(static_data_folder, f"{var}.tif")
+
+        with rasterio.open(path) as src:
+            arr = src.read(1, window=window)
+            profile = src.profile.copy()
+            if src.nodata is not None:
+                NODATA_VALUE = src.nodata
+
+        static_maps.append(arr)
+
+    static_stacked = np.stack(static_maps, axis=0)
+
+    # =====================================================
+    # STATE ARRAYS
+    # =====================================================
+    swe_prev = np.full((H_task, W_task), NODATA_VALUE, dtype=np.float32)
+    swe_prev[local_mask] = trans_zero_swe
+
+    num_blocks_y = (H_task + partition_size_y - 1) // partition_size_y
+    num_blocks_x = (W_task + partition_size_x - 1) // partition_size_x
+
+    hidden_states = [None] * (num_blocks_y * num_blocks_x)
+
+    # =====================================================
+    # TIME LOOP
+    # =====================================================
+    warmup_date = datetime(1979, 10, 1)
+    start_date = datetime(1979, 10, 5)    #(1979, 10, 3)
+    end_date = datetime(1979, 10, 10)     #(1979, 10, 5)
+
+    current_date = warmup_date
+
+    while current_date <= end_date:
+
+        day_str = current_date.strftime("%d_%m_%Y")
+
+        print(f"\nRank {rank} processing {day_str}")
+
+        # =================================================
+        # DYNAMIC VARIABLES (WINDOW READ)
+        # =================================================
+        dynamic_maps = []
+
+        for var in dynamic_vars:
+
+            path = os.path.join(
+                dynamic_data_folder,
+                var,
+                f"CHELSA_{var}_{day_str}_V.2.1.tif"
+            )
+
+            with rasterio.open(path) as src:
+                arr = src.read(1, window=window)
+
+            dynamic_maps.append(arr)
+
+        dynamic_stacked = np.stack(dynamic_maps, axis=0)
+
+        target_stacked = swe_prev[np.newaxis, :, :]
+
+        # =================================================
+        # TILE LOOP
+        # =================================================
+        for i in range(0, H_task, partition_size_y):
+
+            row_end = min(i + partition_size_y, H_task)
+
+            for j in range(0, W_task, partition_size_x):
+
+                col_end = min(j + partition_size_x, W_task)
+
+                tile_mask = local_mask[i:row_end, j:col_end]
+
+                if not np.any(tile_mask):
+                    continue
+
+                valid_idx = np.where(tile_mask.ravel())[0]
+
+                # -----------------------------------------
+                # TILE DATA (ALREADY LOCAL)
+                # -----------------------------------------
+                dyn = dynamic_stacked[:, i:row_end, j:col_end]
+                stat = static_stacked[:, i:row_end, j:col_end]
+                targ = target_stacked[:, i:row_end, j:col_end]
+
+                ph, pw = tile_mask.shape
+
+                dyn = dyn.reshape(len(dynamic_vars), -1).T
+                stat = stat.reshape(len(static_vars), -1).T
+                targ = targ.reshape(1, -1).T
+
+                dyn = dyn[valid_idx]
+                stat = stat[valid_idx]
+                targ = targ[valid_idx]
+
+                # -----------------------------------------
+                # SCALE
+                # -----------------------------------------
+                df_dyn = pd.DataFrame(dyn, columns=dynamic_vars)
+                df_stat = pd.DataFrame(stat, columns=static_vars)
+
+                dyn_s = scalers.transform_dataframe(df_dyn, "dynamic")
+                stat_s = scalers.transform_dataframe(df_stat, "static")
+
+                batch = len(valid_idx)
+
+                x = np.empty((batch, num_features), dtype=np.float32)
+                x[:, 0] = targ.ravel()
+                x[:, 1:1+len(dynamic_vars)] = dyn_s
+                x[:, 1+len(dynamic_vars):] = stat_s
+
+                x = torch.from_numpy(x).reshape(batch, 1, num_features)
+
+                idx = (i // partition_size_y) * num_blocks_x + (j // partition_size_x)
+
+                prev_hidden = hidden_states[idx]
+
+                with torch.no_grad():
+                    pred, h = lstm_model(
+                        x,
+                        min_val=trans_zero_swe,
+                        hidden=prev_hidden
+                    )
+
+                hidden_states[idx] = (h[0].detach(), h[1].detach())
+
+                pred = pred.cpu().numpy().ravel()
+
+                out_tile = np.full(ph * pw, NODATA_VALUE, dtype=np.float32)
+                out_tile[valid_idx] = pred
+                out_tile = out_tile.reshape(ph, pw)
+
+                swe_prev[i:row_end, j:col_end] = out_tile
+
+        # =================================================
+        # WRITE OUTPUT
+        # =================================================
+        if current_date >= start_date:
+
+            inv = np.full((H_task, W_task), NODATA_VALUE, dtype=np.float32)
+
+            valid = swe_prev != NODATA_VALUE
+            inv[valid] = scalers.inverse_transform_target(swe_prev[valid])
+
+            out_dir = os.path.join(dynamic_data_folder, target_var)
+            os.makedirs(out_dir, exist_ok=True)
+
+            out_file = os.path.join(out_dir, f"SWE_{day_str}_r{rank}.tif")
+
+            transform = rasterio.windows.transform(window, profile["transform"])
+
+            profile.update(
+                height=H_task,
+                width=W_task,
+                transform=transform,
+                dtype=rasterio.float32,
+                count=1,
+                nodata=NODATA_VALUE
+            )
+
+            with rasterio.open(out_file, "w", **profile) as dst:
+                dst.write(inv, 1)
+
+        current_date += timedelta(days=1)
+        
+
+def run_inference_multi_node_hybrid_model():
+
+    # =====================================================
+    # DOMAIN SIZE
+    # =====================================================
+    H, W = 10080, 43200
+
+    partition_size_y = 2500   #1000   #200
+    partition_size_x = 2500   #1000   #300
+
+    # =====================================================
+    # SLURM SETUP
+    # =====================================================
+    n_tasks = int(os.environ["SLURM_NTASKS"])
+    rank = int(os.environ["SLURM_PROCID"])
+    
+#    n_cols = int(np.sqrt(n_tasks))
+#    n_rows = int(np.ceil(n_tasks / n_cols))
+
+    print("get_num_threads: ", torch.get_num_threads())
+    print("get_num_interop_threads: ", torch.get_num_interop_threads())
+
+    n_cols = n_tasks
+    n_rows = 1
+
+    row_id = rank // n_cols
+    col_id = rank % n_cols
+
+    row_blocks = np.array_split(np.arange(H), n_rows)
+    col_blocks = np.array_split(np.arange(W), n_cols)
+
+    H_start = row_blocks[row_id][0]
+    H_end   = row_blocks[row_id][-1] + 1
+
+    W_start = col_blocks[col_id][0]
+    W_end   = col_blocks[col_id][-1] + 1
+
+    H_task = H_end - H_start
+    W_task = W_end - W_start
+
+    # =====================================================
+    # PATHS
+    # =====================================================
+    dynamic_data_folder = "/projects/prjs1930/pilot_data"
+    static_data_folder = "/projects/prjs1930/pilot_data/DEM"
+    mask_file = "/projects/prjs1930/pilot_data/inference_mask.tif"
+    model_folder = "hybrid_models"      #"models_0" #"models_20260510" #"models_0"
+
+    scalers_path_model_folder = Path(model_folder)
+
+    dynamic_vars = ["pr", "rsds", "tas", "sd"]
+    static_vars = ["elevation_mn", "slope_mn", "eastness_mn", "northness_mn", "tpi_mn"]
+
+    target_var = "swe"
+
+    all_vars = dynamic_vars + static_vars
+    num_features = len(all_vars) + 1
+
+    # =====================================================
+    # MODEL
+    # =====================================================
+    
+    hidden_size = 128 #64    
+    num_layers = 1    #2    
+
+    lstm_model = LSTM_MultiLayer(
+        input_size=num_features,
+        hidden_size=hidden_size,
+        num_layers=num_layers
+    )
+    
+    model_path = os.path.join(model_folder, "lstm_model.pt")
+
+    lstm_model.load_state_dict(
+        torch.load(model_path, map_location="cpu")
+    )
+    lstm_model.eval()
+
+    # =====================================================
+    # SCALERS
+    # =====================================================
+
+    scalers = DataScaler()
+
+    scalers.load_transformers(
+        scalers_path_model_folder
+    )
+
+    trans_zero_swe = scalers.get_transformed_zero()
+
+    # =====================================================
+    # WINDOW (CRITICAL)
+    # =====================================================
+    window = Window(
+        col_off=W_start,
+        row_off=H_start,
+        width=W_task,
+        height=H_task
+    )
+
+    # =====================================================
+    # MASK (LOCAL ONLY)
+    # =====================================================
+    with rasterio.open(mask_file) as src:
+        local_mask = src.read(1, window=window).astype(bool)
+
+    # =====================================================
+    # STATIC DATA (READ ONLY ONCE PER NODE)
+    # =====================================================
+    static_maps = []
+
+    NODATA_VALUE = -9999.0
+    profile = None
+
+    for var in static_vars:
+
+        path = os.path.join(static_data_folder, f"{var}.tif")
+
+        with rasterio.open(path) as src:
+            arr = src.read(1, window=window)
+            profile = src.profile.copy()
+            if src.nodata is not None:
+                NODATA_VALUE = src.nodata
+
+        static_maps.append(arr)
+
+    static_stacked = np.stack(static_maps, axis=0)
+
+    # =====================================================
+    # STATE ARRAYS
+    # =====================================================
+    swe_prev = np.full((H_task, W_task), NODATA_VALUE, dtype=np.float32)
+    swe_prev[local_mask] = trans_zero_swe
+
+    num_blocks_y = (H_task + partition_size_y - 1) // partition_size_y
+    num_blocks_x = (W_task + partition_size_x - 1) // partition_size_x
+
+    hidden_states = [None] * (num_blocks_y * num_blocks_x)
+
+    # =====================================================
+    # TIME LOOP
+    # =====================================================
+    warmup_date = datetime(1979, 10, 1)
+    start_date = datetime(1979, 10, 5)    #(1979, 10, 3)
+    end_date = datetime(1979, 10, 10)     #(1979, 10, 5)
+
+    current_date = warmup_date
+
+    while current_date <= end_date:
+
+        day_str = current_date.strftime("%d_%m_%Y")
+
+        print(f"\nRank {rank} processing {day_str}")
+
+        # =================================================
+        # DYNAMIC VARIABLES (WINDOW READ)
+        # =================================================
+        dynamic_maps = []
+
+        for var in dynamic_vars:
+
+            if var == "sd":
+                filename = f"{var}_ERA5-Land_{day_str}.tif"
+                path = os.path.join(dynamic_data_folder, var, filename)
+        
+            else:
+                filename = f"CHELSA_{var}_{day_str}_V.2.1.tif"
+                path = os.path.join(dynamic_data_folder, var, filename)
+        
+            with rasterio.open(path) as src:
+                arr = src.read(1, window=window)
+
+
+            dynamic_maps.append(arr)
+
+        dynamic_stacked = np.stack(dynamic_maps, axis=0)
+
+        target_stacked = swe_prev[np.newaxis, :, :]
+
+        # =================================================
+        # TILE LOOP
+        # =================================================
+        for i in range(0, H_task, partition_size_y):
+
+            row_end = min(i + partition_size_y, H_task)
+
+            for j in range(0, W_task, partition_size_x):
+
+                col_end = min(j + partition_size_x, W_task)
+
+                tile_mask = local_mask[i:row_end, j:col_end]
+
+                if not np.any(tile_mask):
+                    continue
+
+                valid_idx = np.where(tile_mask.ravel())[0]
+
+                # -----------------------------------------
+                # TILE DATA (ALREADY LOCAL)
+                # -----------------------------------------
+                dyn = dynamic_stacked[:, i:row_end, j:col_end]
+                stat = static_stacked[:, i:row_end, j:col_end]
+                targ = target_stacked[:, i:row_end, j:col_end]
+
+                ph, pw = tile_mask.shape
+
+                dyn = dyn.reshape(len(dynamic_vars), -1).T
+                stat = stat.reshape(len(static_vars), -1).T
+                targ = targ.reshape(1, -1).T
+
+                dyn = dyn[valid_idx]
+                stat = stat[valid_idx]
+                targ = targ[valid_idx]
+
+                # -----------------------------------------
+                # SCALE
+                # -----------------------------------------
+                df_dyn = pd.DataFrame(dyn, columns=dynamic_vars)
+                df_stat = pd.DataFrame(stat, columns=static_vars)
+
+                dyn_s = scalers.transform_dataframe(df_dyn, "dynamic")
+                stat_s = scalers.transform_dataframe(df_stat, "static")
+
+                batch = len(valid_idx)
+
+                x = np.empty((batch, num_features), dtype=np.float32)
+                x[:, 0] = targ.ravel()
+                x[:, 1:1+len(dynamic_vars)] = dyn_s
+                x[:, 1+len(dynamic_vars):] = stat_s
+
+                x = torch.from_numpy(x).reshape(batch, 1, num_features)
+
+                idx = (i // partition_size_y) * num_blocks_x + (j // partition_size_x)
+
+                prev_hidden = hidden_states[idx]
+
+                with torch.no_grad():
+                    pred, h = lstm_model(
+                        x,
+                        min_val=trans_zero_swe,
+                        hidden=prev_hidden
+                    )
+
+                hidden_states[idx] = (h[0].detach(), h[1].detach())
+
+                pred = pred.cpu().numpy().ravel()
+
+                out_tile = np.full(ph * pw, NODATA_VALUE, dtype=np.float32)
+                out_tile[valid_idx] = pred
+                out_tile = out_tile.reshape(ph, pw)
+
+                swe_prev[i:row_end, j:col_end] = out_tile
+
+        # =================================================
+        # WRITE OUTPUT
+        # =================================================
+        if current_date >= start_date:
+
+            inv = np.full((H_task, W_task), NODATA_VALUE, dtype=np.float32)
+
+            valid = swe_prev != NODATA_VALUE
+            inv[valid] = scalers.inverse_transform_target(swe_prev[valid])
+
+            out_dir = os.path.join(dynamic_data_folder, target_var)
+            os.makedirs(out_dir, exist_ok=True)
+
+            out_file = os.path.join(out_dir, f"SWE_{day_str}_r{rank}.tif")
+
+            transform = rasterio.windows.transform(window, profile["transform"])
+
+            profile.update(
+                height=H_task,
+                width=W_task,
+                transform=transform,
+                dtype=rasterio.float32,
+                count=1,
+                nodata=NODATA_VALUE
+            )
+
+            with rasterio.open(out_file, "w", **profile) as dst:
+                dst.write(inv, 1)
 
         current_date += timedelta(days=1)
