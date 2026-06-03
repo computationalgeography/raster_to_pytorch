@@ -1311,6 +1311,7 @@ def run_inference_multi_node_hybrid_model():
         with rasterio.open(path) as src:
             arr = src.read(1, window=window)
             profile = src.profile.copy()
+            original_transform = profile["transform"]
             if src.nodata is not None:
                 NODATA_VALUE = src.nodata
 
@@ -1458,7 +1459,7 @@ def run_inference_multi_node_hybrid_model():
 
             out_file = os.path.join(out_dir, f"SWE_{day_str}_r{rank}.tif")
 
-            transform = rasterio.windows.transform(window, profile["transform"])
+            transform = rasterio.windows.transform(window, original_transform)
 
             profile.update(
                 height=H_task,
