@@ -1240,7 +1240,7 @@ def run_inference_multi_node_hybrid_model():
 
     scalers_path_model_folder = Path(model_folder)
 
-    dynamic_vars = ["pr", "rsds", "tas", "sd"]
+    dynamic_vars = ["pr", "rsds", "tas", "era5_swe"]
     static_vars = ["elevation_mn", "slope_mn", "eastness_mn", "northness_mn", "tpi_mn"]
 
     target_var = "swe"
@@ -1352,9 +1352,9 @@ def run_inference_multi_node_hybrid_model():
 
         for var in dynamic_vars:
 
-            if var == "sd":
-                filename = f"{var}_ERA5-Land_{day_str}.tif"
-                path = os.path.join(dynamic_data_folder, var, filename)
+            if var == "era5_swe":
+                filename = f"sd_ERA5-Land_{day_str}.tif"
+                path = os.path.join(dynamic_data_folder, "sd", filename)
         
             else:
                 filename = f"CHELSA_{var}_{day_str}_V.2.1.tif"
