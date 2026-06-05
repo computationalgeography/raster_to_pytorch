@@ -1310,6 +1310,7 @@ def run_inference_multi_node_hybrid_model():
 
         with rasterio.open(path) as src:
             arr = src.read(1, window=window)
+            arr = arr*src.scales[0] + src.offsets[0]  # apply scale and offset
             profile = src.profile.copy()
             original_transform = profile["transform"]
             if src.nodata is not None:
@@ -1362,6 +1363,8 @@ def run_inference_multi_node_hybrid_model():
         
             with rasterio.open(path) as src:
                 arr = src.read(1, window=window)
+                scale_factor = src.scales[0] * (1000 if var == "era5_swe" else 1) # convert to era5 to mm
+                arr = arr*scale_factor + src.offsets[0]  # apply scale and offset
 
 
             dynamic_maps.append(arr)
