@@ -4,7 +4,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16     #32          #16
 #SBATCH --mail-user=s.farajigargari@uu.nl
-#SBATCH --mail-type=ALL
+#SBATCH --mail-type=END
 #SBATCH --partition=fat_genoa
 #SBATCH --mem=250G     #800G #500G  #250G       # define allocated memory 
 #SBATCH --time=02:00:00

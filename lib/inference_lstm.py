@@ -17,6 +17,8 @@ import sys
 import pandas as pd
 import rasterio
 import numpy as np
+import psutil
+import gc
 
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -61,8 +63,8 @@ def run_inference():
 
     # Date range
     warmup_date = datetime(1979, 10, 1)   # initital date 
-    start_date = datetime(1979, 10, 5)    # end of warmup
-    end_date   = datetime(1979, 10, 10)
+    start_date = datetime(1979, 10, 30)    # end of warmup
+    end_date   = datetime(1979, 12, 30)
 #    end_date   = datetime(1979, 10, 15)
     # end_date   = datetime(2020, 9, 30)
 
@@ -1051,8 +1053,8 @@ def run_inference_multi_node():
     # TIME LOOP
     # =====================================================
     warmup_date = datetime(1979, 10, 1)
-    start_date = datetime(1979, 10, 5)    #(1979, 10, 3)
-    end_date = datetime(1979, 10, 10)     #(1979, 10, 5)
+    start_date = datetime(1980, 10, 1)    #(1979, 10, 3)
+    end_date = datetime(1981, 10, 1)     #(1979, 10, 5)
 
     current_date = warmup_date
 
@@ -1197,20 +1199,34 @@ def run_inference_multi_node_hybrid_model():
     # =====================================================
     H, W = 10080, 43200
 
-    partition_size_y = 2500   #1000   #200
-    partition_size_x = 2500   #1000   #300
+    partition_size_y = 1000  #2500   #1000   #200
+    partition_size_x = 1000  #2500   #1000   #300
 
     # =====================================================
     # SLURM SETUP
     # =====================================================
-    n_tasks = int(os.environ["SLURM_NTASKS"])
-    rank = int(os.environ["SLURM_PROCID"])
+#    n_tasks = 8 #int(os.environ["SLURM_NTASKS"])
+#    rank = 4 #int(os.environ["SLURM_PROCID"])
+    
+    rank = int(os.environ["SLURM_ARRAY_TASK_ID"])
+    n_tasks = int(os.environ["SLURM_ARRAY_TASK_COUNT"])
     
 #    n_cols = int(np.sqrt(n_tasks))
 #    n_rows = int(np.ceil(n_tasks / n_cols))
 
     print("get_num_threads: ", torch.get_num_threads())
     print("get_num_interop_threads: ", torch.get_num_interop_threads())
+
+    def debug_mem(tag=None):
+        try:
+            p = psutil.Process(os.getpid())
+            mem = p.memory_info().rss / (1024 ** 2)
+            vm = psutil.virtual_memory()
+            print(f"[MEM] {tag or ''} RSS={mem:.1f}MB, VM%={vm.percent}%")
+        except Exception as e:
+            print("[MEM] psutil not available:", e)
+
+    debug_mem("after thread setup")
 
     n_cols = n_tasks
     n_rows = 1
@@ -1230,6 +1246,9 @@ def run_inference_multi_node_hybrid_model():
     H_task = H_end - H_start
     W_task = W_end - W_start
 
+    print(f"Task window rows: {H_start}:{H_end} (H_task={H_task}), cols: {W_start}:{W_end} (W_task={W_task})")
+    print(f"Partition size: y={partition_size_y}, x={partition_size_x}")
+
     # =====================================================
     # PATHS
     # =====================================================
@@ -1240,7 +1259,7 @@ def run_inference_multi_node_hybrid_model():
 
     scalers_path_model_folder = Path(model_folder)
 
-    dynamic_vars = ["pr", "rsds", "tas", "sd"]
+    dynamic_vars = ["pr", "rsds", "tas", "era5_swe"]
     static_vars = ["elevation_mn", "slope_mn", "eastness_mn", "northness_mn", "tpi_mn"]
 
     target_var = "swe"
@@ -1296,12 +1315,16 @@ def run_inference_multi_node_hybrid_model():
     with rasterio.open(mask_file) as src:
         local_mask = src.read(1, window=window).astype(bool)
 
+    print("local_mask shape:", local_mask.shape, "sum(valid)=", np.count_nonzero(local_mask))
+    print("local_mask nbytes:", local_mask.nbytes)
+    debug_mem("after mask read")
+
     # =====================================================
     # STATIC DATA (READ ONLY ONCE PER NODE)
     # =====================================================
     static_maps = []
 
-    NODATA_VALUE = -9999.0
+    NODATA_VALUE = -9999.0 #-32768
     profile = None
 
     for var in static_vars:
@@ -1310,31 +1333,52 @@ def run_inference_multi_node_hybrid_model():
 
         with rasterio.open(path) as src:
             arr = src.read(1, window=window)
+            arr = arr*src.scales[0] + src.offsets[0]  # apply scale and offset
             profile = src.profile.copy()
-            if src.nodata is not None:
-                NODATA_VALUE = src.nodata
+            original_transform = profile["transform"]
+            # if src.nodata is not None:
+            #     NODATA_VALUE = src.nodata
 
         static_maps.append(arr)
 
     static_stacked = np.stack(static_maps, axis=0)
 
+    print("static_stacked shape:", static_stacked.shape, "nbytes:", static_stacked.nbytes)
+    debug_mem("after reading static")
+
     # =====================================================
     # STATE ARRAYS
     # =====================================================
-    swe_prev = np.full((H_task, W_task), NODATA_VALUE, dtype=np.float32)
+    swe_prev = np.full((H_task, W_task), np.nan, dtype=np.float32)
     swe_prev[local_mask] = trans_zero_swe
+
+    # Print the NODATA_VALUE and transformed zero for debugging
+    print("transformed zero SWE:", trans_zero_swe)
+    print("swe_prev initialized shape:", swe_prev.shape, "nbytes:", swe_prev.nbytes)
+    print("swe_prev sample min,max:", float(np.nanmin(swe_prev)), float(np.nanmax(swe_prev)))
+    debug_mem("after swe_prev init")
+
+    # Inverse transorm swe_prev to check the initial values in original scale
+    inv_swe_prev = np.full_like(swe_prev, np.nan)
+    valid = ~np.isnan(swe_prev)
+    inv_swe_prev[valid] = scalers.inverse_transform_target(swe_prev[valid])
+    print("inverse transformed swe_prev sample min,max:", float(np.nanmin(inv_swe_prev)), float(np.nanmax(inv_swe_prev)))
 
     num_blocks_y = (H_task + partition_size_y - 1) // partition_size_y
     num_blocks_x = (W_task + partition_size_x - 1) // partition_size_x
 
     hidden_states = [None] * (num_blocks_y * num_blocks_x)
 
+    print("num_blocks_y, num_blocks_x:", num_blocks_y, num_blocks_x)
+    print("hidden_states length:", len(hidden_states))
+    debug_mem("before time loop")
+
     # =====================================================
     # TIME LOOP
     # =====================================================
     warmup_date = datetime(1979, 10, 1)
-    start_date = datetime(1979, 10, 5)    #(1979, 10, 3)
-    end_date = datetime(1979, 10, 10)     #(1979, 10, 5)
+    start_date = datetime(1980, 10, 1)      #(1979, 10, 3)
+    end_date = datetime(1982, 10, 1)        #(1979, 10, 5)
 
     current_date = warmup_date
 
@@ -1344,6 +1388,8 @@ def run_inference_multi_node_hybrid_model():
 
         print(f"\nRank {rank} processing {day_str}")
 
+        debug_mem(f"start day {day_str}")
+
         # =================================================
         # DYNAMIC VARIABLES (WINDOW READ)
         # =================================================
@@ -1351,9 +1397,9 @@ def run_inference_multi_node_hybrid_model():
 
         for var in dynamic_vars:
 
-            if var == "sd":
-                filename = f"{var}_ERA5-Land_{day_str}.tif"
-                path = os.path.join(dynamic_data_folder, var, filename)
+            if var == "era5_swe":
+                filename = f"sd_ERA5-Land_{day_str}.tif"
+                path = os.path.join(dynamic_data_folder, "sd", filename)
         
             else:
                 filename = f"CHELSA_{var}_{day_str}_V.2.1.tif"
@@ -1361,13 +1407,19 @@ def run_inference_multi_node_hybrid_model():
         
             with rasterio.open(path) as src:
                 arr = src.read(1, window=window)
+                scale_factor = src.scales[0] * (1000 if var == "era5_swe" else 1) # convert to era5 to mm
+                arr = arr*scale_factor + src.offsets[0]  # apply scale and offset
 
 
             dynamic_maps.append(arr)
 
         dynamic_stacked = np.stack(dynamic_maps, axis=0)
-
         target_stacked = swe_prev[np.newaxis, :, :]
+
+        if current_date == warmup_date:
+            print("dynamic_stacked shape:", dynamic_stacked.shape, "nbytes:", dynamic_stacked.nbytes)
+            print("target_stacked shape:", target_stacked.shape)
+            debug_mem("after dynamic stack (first day)")
 
         # =================================================
         # TILE LOOP
@@ -1416,9 +1468,13 @@ def run_inference_multi_node_hybrid_model():
                 batch = len(valid_idx)
 
                 x = np.empty((batch, num_features), dtype=np.float32)
-                x[:, 0] = targ.ravel()
-                x[:, 1:1+len(dynamic_vars)] = dyn_s
-                x[:, 1+len(dynamic_vars):] = stat_s
+#                x[:, 0] = targ.ravel()
+#                x[:, 1:1+len(dynamic_vars)] = dyn_s
+#                x[:, 1+len(dynamic_vars):] = stat_s
+                
+                x[:, 0:len(dynamic_vars)] = dyn_s
+                x[:, len(dynamic_vars):-1] = stat_s
+                x[:, -1] = targ.ravel()
 
                 x = torch.from_numpy(x).reshape(batch, 1, num_features)
 
@@ -1437,11 +1493,17 @@ def run_inference_multi_node_hybrid_model():
 
                 pred = pred.cpu().numpy().ravel()
 
-                out_tile = np.full(ph * pw, NODATA_VALUE, dtype=np.float32)
+                # if hasattr(h[0], 'shape'):
+                #     print("hidden h0 shape:", tuple(h[0].shape), "h1 shape:", tuple(h[1].shape))
+
+                out_tile = np.full(ph * pw, np.nan, dtype=np.float32)
                 out_tile[valid_idx] = pred
                 out_tile = out_tile.reshape(ph, pw)
 
                 swe_prev[i:row_end, j:col_end] = out_tile
+
+                # print("updated swe_prev region min,max:", float(np.nanmin(swe_prev[i:row_end, j:col_end])), float(np.nanmax(swe_prev[i:row_end, j:col_end])))
+
 
         # =================================================
         # WRITE OUTPUT
@@ -1450,15 +1512,17 @@ def run_inference_multi_node_hybrid_model():
 
             inv = np.full((H_task, W_task), NODATA_VALUE, dtype=np.float32)
 
-            valid = swe_prev != NODATA_VALUE
+            valid = ~np.isnan(swe_prev)
             inv[valid] = scalers.inverse_transform_target(swe_prev[valid])
+
+            print("output stats: valid pixels", np.count_nonzero(valid), " min,max:", float(np.nanmin(inv[valid])) if np.count_nonzero(valid) else None, float(np.nanmax(inv[valid])) if np.count_nonzero(valid) else None)
 
             out_dir = os.path.join(dynamic_data_folder, target_var)
             os.makedirs(out_dir, exist_ok=True)
 
             out_file = os.path.join(out_dir, f"SWE_{day_str}_r{rank}.tif")
 
-            transform = rasterio.windows.transform(window, profile["transform"])
+            transform = rasterio.windows.transform(window, original_transform)
 
             profile.update(
                 height=H_task,
@@ -1471,5 +1535,416 @@ def run_inference_multi_node_hybrid_model():
 
             with rasterio.open(out_file, "w", **profile) as dst:
                 dst.write(inv, 1)
+
+            try:
+                fsize = os.path.getsize(out_file) / (1024 ** 2)
+                print(f"Wrote output {out_file}, size={fsize:.2f} MB")
+            except Exception:
+                print("Wrote output", out_file)
+
+        current_date += timedelta(days=1)
+        
+
+def run_inference_multi_node_hybrid_model_debug():
+
+    # =====================================================
+    # Debug variables
+    # =====================================================
+
+    debug_col = 22541
+    debug_row = 4577
+     
+    enable_debug_pixel = True
+     
+    debug_time = "14_10_1980"
+
+    # =====================================================
+    # DOMAIN SIZE
+    # =====================================================
+    H, W = 10080, 43200
+
+    partition_size_y = 1000  #2500   #1000   #200
+    partition_size_x = 1000  #2500   #1000   #300
+
+    # =====================================================
+    # SLURM SETUP
+    # =====================================================
+    n_tasks = 8 #int(os.environ["SLURM_NTASKS"])
+    rank = 4 #int(os.environ["SLURM_PROCID"])
+    
+#    n_cols = int(np.sqrt(n_tasks))
+#    n_rows = int(np.ceil(n_tasks / n_cols))
+
+    print("get_num_threads: ", torch.get_num_threads())
+    print("get_num_interop_threads: ", torch.get_num_interop_threads())
+
+    def debug_mem(tag=None):
+        try:
+            p = psutil.Process(os.getpid())
+            mem = p.memory_info().rss / (1024 ** 2)
+            vm = psutil.virtual_memory()
+            print(f"[MEM] {tag or ''} RSS={mem:.1f}MB, VM%={vm.percent}%")
+        except Exception as e:
+            print("[MEM] psutil not available:", e)
+
+    debug_mem("after thread setup")
+
+    n_cols = n_tasks
+    n_rows = 1
+
+    row_id = rank // n_cols
+    col_id = rank % n_cols
+
+    row_blocks = np.array_split(np.arange(H), n_rows)
+    col_blocks = np.array_split(np.arange(W), n_cols)
+
+    H_start = row_blocks[row_id][0]
+    H_end   = row_blocks[row_id][-1] + 1
+
+    W_start = col_blocks[col_id][0]
+    W_end   = col_blocks[col_id][-1] + 1
+
+    H_task = H_end - H_start
+    W_task = W_end - W_start
+
+    print(f"Task window rows: {H_start}:{H_end} (H_task={H_task}), cols: {W_start}:{W_end} (W_task={W_task})")
+    print(f"Partition size: y={partition_size_y}, x={partition_size_x}")
+
+    # =====================================================
+    # PATHS
+    # =====================================================
+    dynamic_data_folder = "/projects/prjs1930/pilot_data"
+    static_data_folder = "/projects/prjs1930/pilot_data/DEM"
+    mask_file = "/projects/prjs1930/pilot_data/inference_mask.tif"
+    model_folder = "hybrid_models"      #"models_0" #"models_20260510" #"models_0"
+
+    scalers_path_model_folder = Path(model_folder)
+
+    dynamic_vars = ["pr", "rsds", "tas", "era5_swe"]
+    static_vars = ["elevation_mn", "slope_mn", "eastness_mn", "northness_mn", "tpi_mn"]
+
+    target_var = "swe"
+
+    all_vars = dynamic_vars + static_vars
+    num_features = len(all_vars) + 1
+
+    # =====================================================
+    # MODEL
+    # =====================================================
+    
+    hidden_size = 128 #64    
+    num_layers = 1    #2    
+
+    lstm_model = LSTM_MultiLayer(
+        input_size=num_features,
+        hidden_size=hidden_size,
+        num_layers=num_layers
+    )
+    
+    model_path = os.path.join(model_folder, "lstm_model.pt")
+
+    lstm_model.load_state_dict(
+        torch.load(model_path, map_location="cpu")
+    )
+    lstm_model.eval()
+
+    # =====================================================
+    # SCALERS
+    # =====================================================
+
+    scalers = DataScaler()
+
+    scalers.load_transformers(
+        scalers_path_model_folder
+    )
+
+    trans_zero_swe = scalers.get_transformed_zero()
+
+    # =====================================================
+    # WINDOW (CRITICAL)
+    # =====================================================
+    window = Window(
+        col_off=W_start,
+        row_off=H_start,
+        width=W_task,
+        height=H_task
+    )
+
+    # =====================================================
+    # MASK (LOCAL ONLY)
+    # =====================================================
+    with rasterio.open(mask_file) as src:
+        local_mask = src.read(1, window=window).astype(bool)
+
+    print("local_mask shape:", local_mask.shape, "sum(valid)=", np.count_nonzero(local_mask))
+    print("local_mask nbytes:", local_mask.nbytes)
+    debug_mem("after mask read")
+
+    # =====================================================
+    # STATIC DATA (READ ONLY ONCE PER NODE)
+    # =====================================================
+    static_maps = []
+
+    NODATA_VALUE = -9999.0 #-32768
+    profile = None
+
+    for var in static_vars:
+
+        path = os.path.join(static_data_folder, f"{var}.tif")
+
+        with rasterio.open(path) as src:
+            arr = src.read(1, window=window)
+            arr = arr*src.scales[0] + src.offsets[0]  # apply scale and offset
+            profile = src.profile.copy()
+            original_transform = profile["transform"]
+            # if src.nodata is not None:
+            #     NODATA_VALUE = src.nodata
+
+        static_maps.append(arr)
+
+    static_stacked = np.stack(static_maps, axis=0)
+
+    print("static_stacked shape:", static_stacked.shape, "nbytes:", static_stacked.nbytes)
+    debug_mem("after reading static")
+
+    # =====================================================
+    # STATE ARRAYS
+    # =====================================================
+    swe_prev = np.full((H_task, W_task), np.nan, dtype=np.float32)
+    swe_prev[local_mask] = trans_zero_swe
+
+    # Print the NODATA_VALUE and transformed zero for debugging
+    print("transformed zero SWE:", trans_zero_swe)
+    print("swe_prev initialized shape:", swe_prev.shape, "nbytes:", swe_prev.nbytes)
+    print("swe_prev sample min,max:", float(np.nanmin(swe_prev)), float(np.nanmax(swe_prev)))
+    debug_mem("after swe_prev init")
+
+    # Inverse transorm swe_prev to check the initial values in original scale
+    inv_swe_prev = np.full_like(swe_prev, np.nan)
+    valid = ~np.isnan(swe_prev)
+    inv_swe_prev[valid] = scalers.inverse_transform_target(swe_prev[valid])
+    print("inverse transformed swe_prev sample min,max:", float(np.nanmin(inv_swe_prev)), float(np.nanmax(inv_swe_prev)))
+
+    num_blocks_y = (H_task + partition_size_y - 1) // partition_size_y
+    num_blocks_x = (W_task + partition_size_x - 1) // partition_size_x
+
+    hidden_states = [None] * (num_blocks_y * num_blocks_x)
+
+    print("num_blocks_y, num_blocks_x:", num_blocks_y, num_blocks_x)
+    print("hidden_states length:", len(hidden_states))
+    debug_mem("before time loop")
+
+    # =====================================================
+    # TIME LOOP
+    # =====================================================
+    warmup_date = datetime(1980, 10, 1)   #1979, 10, 1)
+    start_date = datetime(1980, 10, 5)    #(1979, 10, 3)
+    end_date = datetime(1980, 10, 15)     #(1979, 10, 5)
+
+    current_date = warmup_date
+
+    while current_date <= end_date:
+
+        day_str = current_date.strftime("%d_%m_%Y")
+
+        print(f"\nRank {rank} processing {day_str}")
+
+        debug_mem(f"start day {day_str}")
+
+        # =================================================
+        # DYNAMIC VARIABLES (WINDOW READ)
+        # =================================================
+        dynamic_maps = []
+
+        for var in dynamic_vars:
+
+            if var == "era5_swe":
+                filename = f"sd_ERA5-Land_{day_str}.tif"
+                path = os.path.join(dynamic_data_folder, "sd", filename)
+        
+            else:
+                filename = f"CHELSA_{var}_{day_str}_V.2.1.tif"
+                path = os.path.join(dynamic_data_folder, var, filename)
+        
+            with rasterio.open(path) as src:
+                arr = src.read(1, window=window)
+                scale_factor = src.scales[0] * (1000 if var == "era5_swe" else 1) # convert to era5 to mm
+                arr = arr*scale_factor + src.offsets[0]  # apply scale and offset
+
+
+            dynamic_maps.append(arr)
+
+        dynamic_stacked = np.stack(dynamic_maps, axis=0)
+        target_stacked = swe_prev[np.newaxis, :, :]
+
+        if current_date == warmup_date:
+            print("dynamic_stacked shape:", dynamic_stacked.shape, "nbytes:", dynamic_stacked.nbytes)
+            print("target_stacked shape:", target_stacked.shape)
+            debug_mem("after dynamic stack (first day)")
+
+        # =================================================
+        # TILE LOOP
+        # =================================================
+        for i in range(0, H_task, partition_size_y):
+
+            row_end = min(i + partition_size_y, H_task)
+
+            for j in range(0, W_task, partition_size_x):
+
+                col_end = min(j + partition_size_x, W_task)
+
+                tile_mask = local_mask[i:row_end, j:col_end]
+
+                if not np.any(tile_mask):
+                    continue
+
+                valid_idx = np.where(tile_mask.ravel())[0]
+                
+                
+                is_debug_tile = False
+                local_idx = None
+                local_r = None
+                local_c = None
+                
+                
+                if enable_debug_pixel:
+                    if i <= debug_row < row_end and j <= debug_col < col_end and day_str == debug_time:
+                        is_debug_tile = True
+                        
+                        ph_debug, pw_debug = tile_mask.shape
+                
+                        local_r = debug_row - i
+                        local_c = debug_col - j
+                
+                        local_idx = local_r * pw_debug + local_c
+                
+                        print("\n================ DEBUG TILE ================")
+                        print("global (row,col):", debug_row, debug_col)
+                        print("local (r,c):", local_r, local_c)
+                        print("flat index:", local_idx)
+
+                # -----------------------------------------
+                # TILE DATA (ALREADY LOCAL)
+                # -----------------------------------------
+                dyn = dynamic_stacked[:, i:row_end, j:col_end]
+                stat = static_stacked[:, i:row_end, j:col_end]
+                targ = target_stacked[:, i:row_end, j:col_end]
+
+                ph, pw = tile_mask.shape
+
+                dyn = dyn.reshape(len(dynamic_vars), -1).T
+                stat = stat.reshape(len(static_vars), -1).T
+                targ = targ.reshape(1, -1).T
+
+                dyn = dyn[valid_idx]
+                stat = stat[valid_idx]
+                targ = targ[valid_idx]
+
+                # -----------------------------------------
+                # SCALE
+                # -----------------------------------------
+                df_dyn = pd.DataFrame(dyn, columns=dynamic_vars)
+                df_stat = pd.DataFrame(stat, columns=static_vars)
+
+                dyn_s = scalers.transform_dataframe(df_dyn, "dynamic")
+                stat_s = scalers.transform_dataframe(df_stat, "static")
+
+                batch = len(valid_idx)
+
+                x = np.empty((batch, num_features), dtype=np.float32)
+#                x[:, 0] = targ.ravel()
+#                x[:, 1:1+len(dynamic_vars)] = dyn_s
+#                x[:, 1+len(dynamic_vars):] = stat_s
+
+                x[:, 0:len(dynamic_vars)] = dyn_s
+                x[:, len(dynamic_vars):-1] = stat_s
+                x[:, -1] = targ.ravel()
+                
+                if is_debug_tile:
+
+                    print("\n--- DEBUG INPUT CHECK ---")
+                
+                    print("dyn_s:", dyn_s[local_idx])
+                    print("stat_s:", stat_s[local_idx])
+                    print("target:", targ.ravel()[local_idx])
+                
+                    print("FULL LSTM INPUT VECTOR:")
+                    print(x[local_idx, 0, :])
+                    
+
+                x = torch.from_numpy(x).reshape(batch, 1, num_features)
+
+                idx = (i // partition_size_y) * num_blocks_x + (j // partition_size_x)
+
+                prev_hidden = hidden_states[idx]
+
+                with torch.no_grad():
+                    pred, h = lstm_model(
+                        x,
+                        min_val=trans_zero_swe,
+                        hidden=prev_hidden
+                    )
+
+                hidden_states[idx] = (h[0].detach(), h[1].detach())
+
+                pred = pred.cpu().numpy().ravel()
+
+                # if hasattr(h[0], 'shape'):
+                #     print("hidden h0 shape:", tuple(h[0].shape), "h1 shape:", tuple(h[1].shape))
+
+                out_tile = np.full(ph * pw, np.nan, dtype=np.float32)
+                out_tile[valid_idx] = pred
+                out_tile = out_tile.reshape(ph, pw)
+
+                swe_prev[i:row_end, j:col_end] = out_tile
+    
+
+                # print("updated swe_prev region min,max:", float(np.nanmin(swe_prev[i:row_end, j:col_end])), float(np.nanmax(swe_prev[i:row_end, j:col_end])))
+                
+                if is_debug_tile:
+
+                    print("\n--- DEBUG OUTPUT CHECK ---")
+                
+                    print("prediction:", pred[valid_idx.tolist().index(local_idx)] if local_idx in valid_idx else "NOT VALID PIXEL")
+                
+                    print("previous SWE:", swe_prev[i + local_r, j + local_c])
+
+
+        # =================================================
+        # WRITE OUTPUT
+        # =================================================
+        if current_date >= start_date:
+
+            inv = np.full((H_task, W_task), NODATA_VALUE, dtype=np.float32)
+
+            valid = ~np.isnan(swe_prev)
+            inv[valid] = scalers.inverse_transform_target(swe_prev[valid])
+
+            print("output stats: valid pixels", np.count_nonzero(valid), " min,max:", float(np.nanmin(inv[valid])) if np.count_nonzero(valid) else None, float(np.nanmax(inv[valid])) if np.count_nonzero(valid) else None)
+
+            out_dir = os.path.join(dynamic_data_folder, target_var)
+            os.makedirs(out_dir, exist_ok=True)
+
+            out_file = os.path.join(out_dir, f"SWE_{day_str}_r{rank}.tif")
+
+            transform = rasterio.windows.transform(window, original_transform)
+
+            profile.update(
+                height=H_task,
+                width=W_task,
+                transform=transform,
+                dtype=rasterio.float32,
+                count=1,
+                nodata=NODATA_VALUE
+            )
+
+            with rasterio.open(out_file, "w", **profile) as dst:
+                dst.write(inv, 1)
+
+            try:
+                fsize = os.path.getsize(out_file) / (1024 ** 2)
+                print(f"Wrote output {out_file}, size={fsize:.2f} MB")
+            except Exception:
+                print("Wrote output", out_file)
 
         current_date += timedelta(days=1)
