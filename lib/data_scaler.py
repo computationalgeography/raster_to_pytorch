@@ -21,9 +21,6 @@ class DataScaler:
         self.transformers = {}
         self.var_groups = ['dynamic', 'static', 'target']
 
-    def log1p_clip(self, X):
-        return np.log1p(np.clip(X, 0, None))
-
     def load_transformers(self, scalers_path):
         for var_group in self.var_groups:
             file_path = scalers_path / f'{var_group}_transformer.pkl'

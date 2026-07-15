@@ -13,7 +13,6 @@ num_threads = int(os.environ["SLURM_CPUS_PER_TASK"])
 torch.set_num_threads(num_threads)
 torch.set_num_interop_threads(1)
 
-import sys
 import pandas as pd
 import rasterio
 import numpy as np
@@ -1230,6 +1229,9 @@ def run_inference_multi_node_hybrid_model():
     H_task = H_end - H_start
     W_task = W_end - W_start
 
+    print(f"Task window rows: {H_start}:{H_end} (H_task={H_task}), cols: {W_start}:{W_end} (W_task={W_task})")
+    print(f"Partition size: y={partition_size_y}, x={partition_size_x}")
+
     # =====================================================
     # PATHS
     # =====================================================
@@ -1323,8 +1325,9 @@ def run_inference_multi_node_hybrid_model():
     # =====================================================
     # STATE ARRAYS
     # =====================================================
-    swe_prev = np.full((H_task, W_task), NODATA_VALUE, dtype=np.float32)
+    swe_prev = np.full((H_task, W_task), np.nan, dtype=np.float32)
     swe_prev[local_mask] = trans_zero_swe
+    print("transformed zero SWE:", trans_zero_swe)
 
     num_blocks_y = (H_task + partition_size_y - 1) // partition_size_y
     num_blocks_x = (W_task + partition_size_x - 1) // partition_size_x
@@ -1370,7 +1373,6 @@ def run_inference_multi_node_hybrid_model():
             dynamic_maps.append(arr)
 
         dynamic_stacked = np.stack(dynamic_maps, axis=0)
-
         target_stacked = swe_prev[np.newaxis, :, :]
 
         # =================================================
@@ -1440,8 +1442,7 @@ def run_inference_multi_node_hybrid_model():
                 hidden_states[idx] = (h[0].detach(), h[1].detach())
 
                 pred = pred.cpu().numpy().ravel()
-
-                out_tile = np.full(ph * pw, NODATA_VALUE, dtype=np.float32)
+                out_tile = np.full(ph * pw, np.nan, dtype=np.float32)
                 out_tile[valid_idx] = pred
                 out_tile = out_tile.reshape(ph, pw)
 
@@ -1454,7 +1455,7 @@ def run_inference_multi_node_hybrid_model():
 
             inv = np.full((H_task, W_task), NODATA_VALUE, dtype=np.float32)
 
-            valid = swe_prev != NODATA_VALUE
+            valid = ~np.isnan(swe_prev)
             inv[valid] = scalers.inverse_transform_target(swe_prev[valid])
 
             out_dir = os.path.join(dynamic_data_folder, target_var)
@@ -1475,5 +1476,7 @@ def run_inference_multi_node_hybrid_model():
 
             with rasterio.open(out_file, "w", **profile) as dst:
                 dst.write(inv, 1)
+
+            print("Wrote output to ", out_file)
 
         current_date += timedelta(days=1)
