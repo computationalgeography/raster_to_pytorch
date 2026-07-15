@@ -1250,6 +1250,11 @@ def run_inference_multi_node_hybrid_model():
     all_vars = dynamic_vars + static_vars
     num_features = len(all_vars) + 1
 
+    checkpoint_interval_days = 365  # checkpoint once per year
+    checkpoint_dir = os.path.join(dynamic_data_folder, "checkpoints")
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    checkpoint_file = os.path.join(checkpoint_dir, f"checkpoint_r{rank}.pt")
+
     # =====================================================
     # MODEL
     # =====================================================
@@ -1342,6 +1347,20 @@ def run_inference_multi_node_hybrid_model():
     end_date = datetime(1979, 10, 10)     #(1979, 10, 5)
 
     current_date = warmup_date
+
+    if os.path.exists(checkpoint_file):
+        print(f"Rank {rank}: found checkpoint at {checkpoint_file}, attempting to resume...")
+        try:
+            ckpt = torch.load(checkpoint_file, map_location="cpu")
+            current_date = ckpt["current_date"] + timedelta(days=1)
+            swe_prev = ckpt["swe_prev"]
+            hidden_states = ckpt["hidden_states"]
+            print(f"Rank {rank}: resuming simulation from {current_date.strftime('%d_%m_%Y')} "
+                  f"(last checkpointed day: {ckpt['current_date'].strftime('%d_%m_%Y')})")
+        except Exception as e:
+            print(f"Rank {rank}: failed to load checkpoint ({e}); starting from {current_date.strftime('%d_%m_%Y')} instead")
+    else:
+        print(f"Rank {rank}: no checkpoint found, starting simulation from {current_date.strftime('%d_%m_%Y')}")
 
     while current_date <= end_date:
 
@@ -1479,4 +1498,25 @@ def run_inference_multi_node_hybrid_model():
 
             print("Wrote output to ", out_file)
 
+        # Save checkpoint every checkpoint_interval_days
+        days_since_warmup = (current_date - warmup_date).days
+
+        if days_since_warmup > 0 and days_since_warmup % checkpoint_interval_days == 0:
+            checkpoint_tmp_file = checkpoint_file + ".tmp"
+            torch.save(
+                {
+                    "current_date": current_date,
+                    "swe_prev": swe_prev,
+                    "hidden_states": hidden_states,
+                },
+                checkpoint_tmp_file,
+            )
+            os.replace(checkpoint_tmp_file, checkpoint_file)
+            print(f"Rank {rank}: saved checkpoint at {day_str} -> {checkpoint_file}")
+
         current_date += timedelta(days=1)
+
+    # Remove checkpoint file after successful completion
+    if os.path.exists(checkpoint_file):
+        os.remove(checkpoint_file)
+        print(f"Rank {rank}: simulation completed, removed checkpoint {checkpoint_file}")
