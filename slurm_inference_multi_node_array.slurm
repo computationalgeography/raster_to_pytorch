@@ -1,13 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=lstm_inference_multi_node_arry
-#SBATCH --array=0-3
+#SBATCH --array=0-16      #0-3
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=16     #32          #16
+#SBATCH --cpus-per-task=32    #     16     #32          #16
 #SBATCH --mail-user=s.farajigargari@uu.nl
 #SBATCH --mail-type=END,ARRAY_TASKS
-#SBATCH --partition=fat_genoa
-#SBATCH --mem=250G     #800G #500G  #250G       # define allocated memory 
+#SBATCH --partition=fat_rome     #     fat_genoa
+# #SBATCH --mem=250G     #800G #500G  #250G       # define allocated memory 
 #SBATCH --time=12:00:00
 #SBATCH -o job_%x_%j.out
 #SBATCH -e job_%x_%j.err
