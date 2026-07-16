@@ -12,7 +12,7 @@
 #SBATCH -o job_%x_%j.out
 #SBATCH -e job_%x_%j.err
 
-#SBATCH --exclusive   
+# #SBATCH --exclusive   
 # #SBATCH --constraint=fcn108|fcn109|fcn110|fcn111
 # #SBATCH --nodelist=fcn108,fcn109,fcn110,fcn111
    
