@@ -10,18 +10,18 @@
 # #SBATCH --partition=fat_rome
 # #SBATCH --nodelist=fcn12     #fcn10
 
-#SBATCH --partition=fat_genoa
-#SBATCH --nodelist=fcn108      #fcn104 
+#SBATCH --partition=fat_rome
+# #SBATCH --nodelist=fcn108      #fcn104 
 
 
 # #SBATCH --gres=gpu
-#SBATCH --mem=800G   #500G  #250G       # define allocated memory 
+#SBATCH --mem=120G #800G   #500G  #250G       # define allocated memory 
 #SBATCH -o job_%x_%j.out  
 #SBATCH -e job_%x_%j.err
 #SBATCH --mail-user=s.farajigargari@uu.nl
-#SBATCH --mail-type=ALL
+#SBATCH --mail-type=END
 
-#SBATCH --time=02:00:00    # run time
+#SBATCH --time=12:00:00    # run time
 
 # module purge
 
@@ -40,6 +40,7 @@ module load Miniforge3/25.3.0-3
 source /sw/arch/RHEL9/EB_production/2025/software/Miniforge3/25.3.0-3/etc/profile.d/conda.sh
 
 # activate environment (robust path-based)
+# conda activate /home/opomarolmoya1/.conda/envs/pytorch_env
 conda activate /home/sfaraji1/.conda/envs/pytorch_env
 
 # sanity checks

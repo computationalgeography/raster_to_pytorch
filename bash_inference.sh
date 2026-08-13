@@ -10,4 +10,4 @@ export PYTHONPATH="$PROJECT_ROOT:$PYTHONPATH"
 
 #python -m memory_profiler script/inference.py > memory_profile_inference.txt
 
-python -m scalene --outfile profile_cpu_mem.txt script/inference_with_mask.py
+python -m scalene --outfile profile_cpu_mem.txt script/inference_multi_node_hybrid_model.py
