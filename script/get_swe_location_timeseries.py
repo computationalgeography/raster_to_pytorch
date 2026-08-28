@@ -27,6 +27,10 @@ def main():
 
         print(df)
 
+        # Save the DataFrame to a CSV file
+        output_csv = f"{station}_swe_timeseries.csv"
+        df.to_csv(output_csv, index=False)
+
         plot_timeseries(
             df,
             station

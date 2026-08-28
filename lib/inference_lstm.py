@@ -2057,19 +2057,19 @@ def run_inference_multi_node_hybrid_model_with_saving_states():
     # =====================================================
     # PATHS
     # =====================================================
-    dynamic_data_folder = "/projects/prjs1930/pilot_data"
-    static_data_folder = "/projects/prjs1930/pilot_data/DEM"
-    mask_file = "/projects/prjs1930/pilot_data/inference_mask.tif"
-    model_folder = "hybrid_models"      #"models_0" #"models_20260510" #"models_0"
-    
+    dynamic_data_folder = "/projects/prjs1930/data" #"/projects/prjs1930/pilot_data"
+    static_data_folder = "/projects/prjs1930/data/DEM" #"/projects/prjs1930/pilot_data/DEM"
+    mask_file = "/projects/prjs1930/data/inference_mask.tif" #"/projects/prjs1930/pilot_data/inference_mask.tif"
+    model_folder = "hybrid_models" #"models_0" #"models_20260510" #"models_0"
+    output_folder = "/scratch-shared/opomarolmoya" #"/projects/prjs1930/pilot_data/swe_from_checkpoint"
 
     # =====================================================
     # SLURM SETUP
     # =====================================================
-#    n_tasks =   16 #8 # n_tasks = int(os.environ["SLURM_ARRAY_TASK_COUNT"])
-#    rank =  12 #6 # int(os.environ["SLURM_ARRAY_TASK_ID"])
-    n_tasks = int(os.environ["SLURM_ARRAY_TASK_COUNT"])   # 16 #8
-    rank =   int(os.environ["SLURM_ARRAY_TASK_ID"]) #     12 #6
+    # n_tasks = 16 #8
+    # rank = 11 #6
+    n_tasks = int(os.environ["SLURM_ARRAY_TASK_COUNT"])
+    rank =   int(os.environ["SLURM_ARRAY_TASK_ID"])
     
     
 #    n_cols = int(np.sqrt(n_tasks))
@@ -2153,13 +2153,12 @@ def run_inference_multi_node_hybrid_model_with_saving_states():
 
     all_vars = dynamic_vars + static_vars
     num_features = len(all_vars) + 1
-    
+
     # save states 
     checkpoint_interval_days = 365  # checkpoint once per year
     checkpoint_dir = os.path.join(dynamic_data_folder, "checkpoints")
     os.makedirs(checkpoint_dir, exist_ok=True)
     checkpoint_file = os.path.join(checkpoint_dir, f"checkpoint_r{rank}.pt")
-
 
     # =====================================================
     # MODEL
@@ -2271,26 +2270,22 @@ def run_inference_multi_node_hybrid_model_with_saving_states():
     # TIME LOOP
     # =====================================================
     warmup_date = datetime(1979, 10, 1)
-    start_date = datetime(1980, 10, 1)   #(1979, 10, 3)    #(1979, 10, 3) (1980, 10, 1)
-    end_date = datetime(1981, 12, 1)       #(1982, 10, 1)   #(1979, 10, 5)   #(1979, 10, 5) (1982, 10, 1)
+    start_date = datetime(1980, 10, 1)     #(1980, 10, 1)   #(1979, 10, 3)    #(1979, 10, 3) (1980, 10, 1)
+    end_date = datetime(2020, 9, 30)      #(1981, 12, 1)       #(1982, 10, 1)   #(1979, 10, 5)   #(1979, 10, 5) (1982, 10, 1)
 
     current_date = warmup_date
     
-    # save states
+    # Load saved states
     if os.path.exists(checkpoint_file):
         print(f"Rank {rank}: found checkpoint at {checkpoint_file}, attempting to resume...")
-        try:
-            ckpt = torch.load(checkpoint_file, map_location="cpu")
-            current_date = ckpt["current_date"] + timedelta(days=1)
-            swe_prev = ckpt["swe_prev"]
-            hidden_states = ckpt["hidden_states"]
-            print(f"Rank {rank}: resuming simulation from {current_date.strftime('%d_%m_%Y')} "
-                  f"(last checkpointed day: {ckpt['current_date'].strftime('%d_%m_%Y')})")
-        except Exception as e:
-            print(f"Rank {rank}: failed to load checkpoint ({e}); starting from {current_date.strftime('%d_%m_%Y')} instead")
+        ckpt = torch.load(checkpoint_file, map_location="cpu", weights_only=False)
+        current_date = ckpt["current_date"] + timedelta(days=1)
+        swe_prev = ckpt["swe_prev"]
+        hidden_states = ckpt["hidden_states"]
+        print(f"Rank {rank}: resuming simulation from {current_date.strftime('%d_%m_%Y')} "
+                f"(last checkpointed day: {ckpt['current_date'].strftime('%d_%m_%Y')})")
     else:
         print(f"Rank {rank}: no checkpoint found, starting simulation from {current_date.strftime('%d_%m_%Y')}")
-
 
     while current_date <= end_date:
 
@@ -2427,7 +2422,7 @@ def run_inference_multi_node_hybrid_model_with_saving_states():
 
 #            print("output stats: valid pixels", np.count_nonzero(valid), " min,max:", float(np.nanmin(inv[valid])) if np.count_nonzero(valid) else None, float(np.nanmax(inv[valid])) if np.count_nonzero(valid) else None)
 
-            out_dir = os.path.join(dynamic_data_folder, target_var)
+            out_dir = os.path.join(output_folder, target_var)
             os.makedirs(out_dir, exist_ok=True)
 
             out_file = os.path.join(out_dir, f"SWE_{day_str}_r{rank}.tif")
