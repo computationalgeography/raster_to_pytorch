@@ -8,21 +8,38 @@ def main():
 
     if len(sys.argv) < 5:
         print("Usage:")
-        print("python script/extract_swe_timeseries.py <swe_folder> <lon> <lat> <station_name>")
+        print("python script/extract_swe_timeseries.py <swe_folder> <lon> <lat> <station_name> [starte_date] [end_date]")
         sys.exit(1)
 
     swe_folder = sys.argv[1]
     lon = float(sys.argv[2])
     lat = float(sys.argv[3])
     station = sys.argv[4]
+    
+    start_date = None
+    end_date = None
 
-    print("Inside extract_swe_timeseries.py")
+    if len(sys.argv) > 5:
+        start_date = None if sys.argv[5] == "None" else sys.argv[5]
+
+    if len(sys.argv) > 6:
+        end_date = None if sys.argv[6] == "None" else sys.argv[6]
+        
 
     try:
+#        df = extract_swe_timeseries(
+#            swe_folder,
+#            lon,
+#            lat
+#        )
+
+        
         df = extract_swe_timeseries(
             swe_folder,
             lon,
-            lat
+            lat,
+            start_date,
+            end_date
         )
 
         print(df)
