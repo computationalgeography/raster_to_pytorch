@@ -13,7 +13,6 @@ num_threads = int(os.environ["SLURM_CPUS_PER_TASK"])
 torch.set_num_threads(num_threads)
 torch.set_num_interop_threads(1)
 
-import sys
 import pandas as pd
 import rasterio
 import numpy as np
